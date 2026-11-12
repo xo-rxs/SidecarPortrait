@@ -82,8 +82,20 @@ open /Applications/SidecarPortrait.app
 
 로그는 `~/Library/Logs/SidecarPortrait.log`에 남습니다.
 
-실행 중인 앱에 신호를 보내면 진단 이미지를 `~/Library/Logs/SidecarPortrait-*.png`로 저장합니다. 아이패드에 나가는 화면, 가상 디스플레이, 설정 패널이 포함됩니다.
+실행 중인 앱에 신호를 보내면 진단 이미지를 `~/Library/Logs/SidecarPortrait-*.png`로 저장합니다.
+
+아이패드에 나가는 화면(`target-번호`)과 가상 디스플레이의 실제 화면(`virtual-번호`)을 찍습니다. 둘이 다르면 미러링 문제이고, 같으면 macOS가 그렇게 그리고 있는 것입니다.
 
 ```bash
 kill -USR1 $(pgrep -f "SidecarPortrait.app/Contents/MacOS")
 ```
+
+설정 패널과 메뉴 막대 아이콘을 찍습니다.
+
+```bash
+kill -HUP $(pgrep -f "SidecarPortrait.app/Contents/MacOS")
+```
+
+### 전체 화면에서 메뉴 막대와 제목 막대가 남아 있을 때
+
+커서가 다른 화면에 있는 상태로 세로 화면의 앱이 전체 화면이 되면, 메뉴 막대와 창 제목 막대가 숨겨지지 않고 남습니다. 이 앱의 문제가 아니라 macOS 동작이며, 맥북 내장 화면에서도 똑같이 일어납니다. 세로 화면 위에서 마우스를 한 번 움직이면 숨겨집니다.

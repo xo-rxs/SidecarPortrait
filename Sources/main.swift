@@ -73,6 +73,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCStreamOutput, SCStre
     private var busy = false
     private var lastScreenSummary = ""
     private var signalSources: [DispatchSourceSignal] = []
+    private var dumpCount = 0
+    /// 방금 그린 것과 같은 표면이 다시 들어온 횟수(화면이 갱신되지 않는 문제 추적용)
+    private var sameSurfaceCount = 0
 
     // MARK: 시작·종료
 
@@ -534,6 +537,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCStreamOutput, SCStre
         let surface = unsafeBitCast(surfaceRef, to: IOSurface.self)
         DispatchQueue.main.async { [weak self] in
             guard let self, self.stream === stream else { return }
+            if let current = self.mirrorLayer.contents as? IOSurface, current === surface {
+                self.sameSurfaceCount += 1
+            }
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             self.mirrorLayer.contents = surface
@@ -555,10 +561,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCStreamOutput, SCStre
 
     // MARK: 진단
 
-    /// 동작 확인용 신호.
-    ///   kill -USR1 <pid>: 사이드카 화면, 가상 디스플레이, 설정 패널, 아이콘을
-    ///                     ~/Library/Logs/SidecarPortrait-*.png 로 저장한다.
+    /// 동작 확인용 신호. 결과는 ~/Library/Logs/SidecarPortrait-*.png 로 저장한다.
+    ///   kill -USR1 <pid>: 사이드카 화면과 가상 디스플레이를 찍는다(번호가 붙는다).
     ///   kill -USR2 <pid>: 설정 패널에서 다음 해상도를 고른 것과 똑같이 동작한다.
+    ///   kill -HUP  <pid>: 설정 패널을 띄워 그 창과 아이콘을 찍는다.
     private func installDiagnosticsSignals() {
         func install(_ number: Int32, _ handler: @escaping () -> Void) {
             signal(number, SIG_IGN)
@@ -567,7 +573,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCStreamOutput, SCStre
             source.resume()
             signalSources.append(source)
         }
-        install(SIGUSR1) { [weak self] in self?.dumpDiagnostics() }
+        install(SIGUSR1) { [weak self] in self?.dumpDisplays() }
+        install(SIGHUP) { [weak self] in self?.dumpSettingsPanel() }
         install(SIGUSR2) { [weak self] in
             guard let self else { return }
             let options = AppSettings.resolutionOptions
@@ -580,28 +587,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCStreamOutput, SCStre
         logURL.deletingLastPathComponent().appendingPathComponent("SidecarPortrait-\(name).png")
     }
 
-    private func dumpDiagnostics() {
+    /// 사이드카 화면(아이패드에 나가는 모습)과 가상 디스플레이(실제 화면)를 찍는다.
+    /// 여러 번 찍어 비교할 수 있게 파일 이름에 번호를 붙인다.
+    private func dumpDisplays() {
+        dumpCount += 1
+        let number = dumpCount
         let ids = [("target", targetID), ("virtual", virtualID)].filter { $0.1 != 0 }
-        log("diagnostics: frames=\(frameCount) window=\(window?.frame ?? .zero) ids=\(ids) state=\(settings.state)")
+        let cursor = CGEvent(source: nil)?.location ?? .zero
+        log("diagnostics #\(number): frames=\(frameCount) sameSurface=\(sameSurfaceCount) cursor=\(cursor) virtual=\(CGDisplayBounds(virtualID)) state=\(settings.state)")
+        SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { content, _ in
+            for (name, id) in ids {
+                guard let display = content?.displays.first(where: { $0.displayID == id }) else { continue }
+                let config = SCStreamConfiguration()
+                config.width = display.width
+                config.height = display.height
+                config.showsCursor = true
+                self.capture(SCContentFilter(display: display, excludingWindows: []), config, name: "\(name)-\(number)")
+            }
+        }
+    }
 
+    /// 설정 패널을 띄운 뒤 그 창만 찍고, 아이콘도 그림 파일로 남긴다.
+    private func dumpSettingsPanel() {
         for (name, active) in [("icon-active", true), ("icon-idle", false)] {
             try? StatusIcon.pngData(active: active, pixels: 180)?.write(to: diagnosticsURL(name))
         }
-
-        // 설정 패널을 띄운 뒤 그 창만 캡처한다.
         if !popover.isShown { togglePopover() }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
             guard let self else { return }
             let popoverWindowID = CGWindowID(self.popover.contentViewController?.view.window?.windowNumber ?? 0)
             SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { content, _ in
-                for (name, id) in ids {
-                    guard let display = content?.displays.first(where: { $0.displayID == id }) else { continue }
-                    let config = SCStreamConfiguration()
-                    config.width = display.width
-                    config.height = display.height
-                    config.showsCursor = true
-                    self.capture(SCContentFilter(display: display, excludingWindows: []), config, name: name)
-                }
                 if let window = content?.windows.first(where: { $0.windowID == popoverWindowID }) {
                     let config = SCStreamConfiguration()
                     config.width = Int(window.frame.width * 2)
