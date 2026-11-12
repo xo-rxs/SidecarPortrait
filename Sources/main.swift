@@ -72,6 +72,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCStreamOutput, SCStre
 
     private var busy = false
     private var lastScreenSummary = ""
+
+    /// 캡처에서 빼고 있는 것: 메뉴 막대를 빼는지, 함께 빼는 창 제목 막대 창들. nil이면 다시 적용해야 한다.
+    private struct BarState: Equatable {
+        var hide = false
+        var titleBars: [CGWindowID] = []
+    }
+    private var barState: BarState? = BarState()
     private var signalSources: [DispatchSourceSignal] = []
     private var dumpCount = 0
     /// 방금 그린 것과 같은 표면이 다시 들어온 횟수(화면이 갱신되지 않는 문제 추적용)
@@ -108,13 +115,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCStreamOutput, SCStre
 
         // 마우스가 가려진 사이드카 화면으로 넘어가면 가상 디스플레이로 되돌린다.
         let mask: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
-        NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] _ in self?.keepCursorOffTarget() }
+        NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] _ in self?.mouseMoved() }
         NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
-            self?.keepCursorOffTarget()
+            self?.mouseMoved()
             return event
         }
 
         installDiagnosticsSignals()
+        Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.updateBarHiding() }
         Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.evaluate() }
         evaluate()
     }
@@ -508,6 +516,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCStreamOutput, SCStre
                     return
                 }
                 self.stream = stream
+                self.barState = BarState()   // 새 스트림은 아무것도 빼지 않은 상태로 시작한다
                 stream.startCapture { [weak self] error in
                     DispatchQueue.main.async {
                         guard let self else { return }
@@ -559,6 +568,89 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCStreamOutput, SCStre
         }
     }
 
+    // MARK: 전체 화면에서 남는 막대 가리기
+    //
+    // 세로 화면의 앱이 전체 화면일 때, macOS가 메뉴 막대와 창 제목 막대(닫기·최소화 버튼 줄)를
+    // 띄운 채로 치우지 않는 경우가 있다(다른 화면에서 Space를 바꾼 뒤, 창을 클릭한 뒤 등).
+    // 그리는 것 자체는 막을 수 없으므로, 두 막대를 캡처에서 빼서 아이패드에 보내지 않는다.
+    // 커서가 화면 맨 위 근처에 있을 때와 메뉴가 열려 있을 때는 그대로 보여 준다.
+    // 그래서 커서를 맨 위로 가져가면 평소처럼 막대가 나타난다.
+
+    /// 커서가 이 높이 안(화면 맨 위 기준)에 있으면 막대를 보여 준다. 실제 막대 높이에 맞춰 갱신된다.
+    private var topZoneHeight: CGFloat = 100
+    private var cursorWasInTopZone = false
+
+    private func cursorIsInTopZone() -> Bool {
+        guard virtualID != 0, let cursor = CGEvent(source: nil)?.location else { return false }
+        let display = CGDisplayBounds(virtualID)
+        return display.contains(cursor) && cursor.y - display.minY < topZoneHeight
+    }
+
+    private func currentBarState() -> BarState {
+        guard settings.hideFullScreenBars, virtualID != 0 else { return BarState() }
+        let display = CGDisplayBounds(virtualID)
+        guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+                as? [[String: Any]] else { return BarState() }
+        let menuBarLevel = Int(CGWindowLevelForKey(.mainMenuWindow))
+        let popUpMenuLevel = Int(CGWindowLevelForKey(.popUpMenuWindow))
+        var fullScreen = false
+        var menuOpen = false
+        var barsBottom: CGFloat = 0
+        var titleBars: [CGWindowID] = []
+        for window in windows {
+            guard let layer = window[kCGWindowLayer as String] as? Int,
+                  let number = window[kCGWindowNumber as String] as? NSNumber,
+                  let boundsValue = window[kCGWindowBounds as String],
+                  let bounds = CGRect(dictionaryRepresentation: boundsValue as! CFDictionary),
+                  bounds.intersects(display)
+            else { continue }
+            if layer == popUpMenuLevel { menuOpen = true }
+            guard abs(bounds.minX - display.minX) < 1, abs(bounds.width - display.width) < 1 else { continue }
+            if layer == menuBarLevel, bounds.height < 100 {
+                barsBottom = max(barsBottom, bounds.maxY - display.minY)
+            } else if layer == 0 {
+                if abs(bounds.minY - display.minY) < 1, abs(bounds.height - display.height) < 1 {
+                    // 메뉴 막대 자리까지 화면 전체를 덮는 창이 있으면 전체 화면 Space다.
+                    fullScreen = true
+                } else if bounds.height < 100, bounds.minY - display.minY < 60 {
+                    // 화면 폭 그대로인 얇은 창이 맨 위에 있으면 전체 화면용 제목 막대다.
+                    titleBars.append(number.uint32Value)
+                    barsBottom = max(barsBottom, bounds.maxY - display.minY)
+                }
+            }
+        }
+        topZoneHeight = max(100, barsBottom + 12)
+        guard fullScreen, !menuOpen, !cursorIsInTopZone() else { return BarState() }
+        return BarState(hide: true, titleBars: titleBars.sorted())
+    }
+
+    private func updateBarHiding() {
+        guard stream != nil, !busy else { return }
+        let state = currentBarState()
+        guard state != barState else { return }
+        barState = state
+        log("bar hiding: hide=\(state.hide) titleBars=\(state.titleBars)")
+        let wantedID = virtualID
+        SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { [weak self] content, _ in
+            DispatchQueue.main.async {
+                guard let self, let stream = self.stream, self.virtualID == wantedID else { return }
+                guard self.barState == state else { return }   // 그사이 상태가 또 바뀌었으면 다음 번에 맡긴다
+                guard let display = content?.displays.first(where: { $0.displayID == wantedID }) else {
+                    self.barState = nil   // 다음 번에 다시 시도
+                    return
+                }
+                let excluded = (content?.windows ?? []).filter { state.titleBars.contains($0.windowID) }
+                let filter = SCContentFilter(display: display, excludingWindows: excluded)
+                if #available(macOS 14.2, *) { filter.includeMenuBar = !state.hide }
+                stream.updateContentFilter(filter) { [weak self] error in
+                    guard let error else { return }
+                    log("bar hiding 적용 실패: \(error.localizedDescription)")
+                    DispatchQueue.main.async { self?.barState = nil }
+                }
+            }
+        }
+    }
+
     // MARK: 진단
 
     /// 동작 확인용 신호. 결과는 ~/Library/Logs/SidecarPortrait-*.png 로 저장한다.
@@ -594,7 +686,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCStreamOutput, SCStre
         let number = dumpCount
         let ids = [("target", targetID), ("virtual", virtualID)].filter { $0.1 != 0 }
         let cursor = CGEvent(source: nil)?.location ?? .zero
-        log("diagnostics #\(number): frames=\(frameCount) sameSurface=\(sameSurfaceCount) cursor=\(cursor) virtual=\(CGDisplayBounds(virtualID)) state=\(settings.state)")
+        log("diagnostics #\(number): frames=\(frameCount) sameSurface=\(sameSurfaceCount) bars=\(barState.map { "hide=\($0.hide) \($0.titleBars)" } ?? "pending") cursor=\(cursor) virtual=\(CGDisplayBounds(virtualID)) state=\(settings.state)")
         SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { content, _ in
             for (name, id) in ids {
                 guard let display = content?.displays.first(where: { $0.displayID == id }) else { continue }
@@ -646,6 +738,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCStreamOutput, SCStre
     }
 
     // MARK: 커서
+
+    private func mouseMoved() {
+        let inTopZone = cursorIsInTopZone()
+        if inTopZone != cursorWasInTopZone {
+            cursorWasInTopZone = inTopZone
+            updateBarHiding()
+        }
+        keepCursorOffTarget()
+    }
 
     private func keepCursorOffTarget() {
         guard settings.confineCursor, virtualID != 0, targetID != 0, window != nil,

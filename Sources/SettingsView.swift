@@ -53,6 +53,10 @@ final class AppSettings: ObservableObject {
     @Published var confineCursor: Bool {
         didSet { defaults.set(confineCursor, forKey: "confineCursor") }
     }
+    /// 전체 화면 앱에 남는 메뉴 막대·신호등 줄을 아이패드 화면에서 뺀다(커서가 맨 위 근처일 때는 제외).
+    @Published var hideFullScreenBars: Bool {
+        didSet { defaults.set(hideFullScreenBars, forKey: "hideFullScreenBars") }
+    }
     @Published var launchAtLogin: Bool {
         didSet { if launchAtLogin != oldValue { applyLaunchAtLogin(previous: oldValue) } }
     }
@@ -73,6 +77,7 @@ final class AppSettings: ObservableObject {
         flipped = defaults.bool(forKey: "flipped")
         placement = Placement(rawValue: defaults.string(forKey: "placement") ?? "") ?? .auto
         confineCursor = defaults.object(forKey: "confineCursor") as? Bool ?? true
+        hideFullScreenBars = defaults.object(forKey: "hideFullScreenBars") as? Bool ?? true
         launchAtLogin = SMAppService.mainApp.status == .enabled
     }
 
@@ -135,6 +140,9 @@ struct SettingsView: View {
             Divider()
             switchRow("커서 가두기", detail: "가려진 원래 사이드카 화면으로 커서가 넘어가지 않게 합니다",
                       isOn: $settings.confineCursor)
+            switchRow("전체 화면에서 남는 막대 가리기",
+                      detail: "전체 화면 앱 위에 남는 메뉴 막대와 창 버튼 줄을 아이패드에 보내지 않습니다. 커서를 화면 맨 위로 가져가면 다시 보입니다",
+                      isOn: $settings.hideFullScreenBars)
             switchRow("로그인할 때 자동으로 실행", detail: settings.loginError, isOn: $settings.launchAtLogin)
             Divider()
             HStack {
